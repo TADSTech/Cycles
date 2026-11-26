@@ -21,17 +21,8 @@ pub struct MergeResult {
     pub success: bool,
 }
 
-/// Merges incoming bytes from a BLE sync exchange.
-/// When the CRDT state is initialized, feeds the payload into Automerge and generates
-/// the next sync round message. Falls back to ACK echo for standalone transport tests.
+/// Processes incoming bytes from a BLE transfer exchange and returns an ACK response.
 pub fn merge_incoming(bytes: Vec<u8>) -> MergeResult {
-    if let Some(reply) = crate::api::process_crdt_sync_payload("ble-peer", &bytes) {
-        return MergeResult {
-            response_bytes: Some(reply),
-            success: true,
-        };
-    }
-
     let mut ack_response = b"ACK:".to_vec();
     ack_response.extend_from_slice(&bytes);
     MergeResult {
@@ -142,93 +133,5 @@ mod tests {
         let expected_ack = [b"ACK:", &payload[..]].concat();
         assert_eq!(response_received_by_a.len(), expected_ack.len());
         assert_eq!(response_received_by_a, expected_ack);
-    }
-
-    #[test]
-    fn test_crdt_automerge_sync_over_simulated_ble_frames() {
-        use crate::crdt::{SyncSession, TaskDoc, TaskRecord};
-
-        let mut doc_a = TaskDoc::new();
-        let mut doc_b = TaskDoc::new();
-
-        let mut session_a = SyncSession::new();
-        let mut session_b = SyncSession::new();
-
-        // Add a task to doc A
-        let task = TaskRecord {
-            id: "task-ble-001".to_string(),
-            project_id: "project-1".to_string(),
-            title: "Test BLE CRDT Sync".to_string(),
-            notes: "This task traveled over simulated BLE chunked frames".to_string(),
-            due_millis: Some(1742400000000),
-            tags: vec!["ble".to_string(), "p2p".to_string()],
-            status: "open".to_string(),
-            priority: 1,
-            created_at_millis: 1742400000000,
-            updated_at_millis: 1742400000000,
-        };
-        doc_a.upsert_task(&task).expect("upsert task");
-
-        let mut total_chunks_transferred = 0;
-        let mut rounds = 0;
-
-        loop {
-            rounds += 1;
-            assert!(rounds < 20, "sync did not converge within 20 rounds");
-            let mut quiet = true;
-
-            // A -> B step
-            if let Some(msg_a) = session_a.generate_message(&mut doc_a) {
-                quiet = false;
-                // Chunk into small 20-byte BLE frames
-                let frames_a = Chunker::chunk(rounds as u16 * 2, &msg_a, 20);
-                total_chunks_transferred += frames_a.len();
-                let mut reassembler_b = Reassembler::new();
-                let mut reassembled_b = None;
-                for frame in frames_a {
-                    let wire = frame.encode();
-                    let decoded = Frame::decode(&wire).expect("decode wire on B");
-                    if let Some(payload) = reassembler_b.feed(decoded).expect("feed on B") {
-                        reassembled_b = Some(payload);
-                    }
-                }
-                let payload = reassembled_b.expect("reassembly completed on B");
-                session_b.receive_message(&mut doc_b, payload).expect("receive on B");
-            }
-
-            // B -> A step
-            if let Some(msg_b) = session_b.generate_message(&mut doc_b) {
-                quiet = false;
-                let frames_b = Chunker::chunk(rounds as u16 * 2 + 1, &msg_b, 20);
-                total_chunks_transferred += frames_b.len();
-                let mut reassembler_a = Reassembler::new();
-                let mut reassembled_a = None;
-                for frame in frames_b {
-                    let wire = frame.encode();
-                    let decoded = Frame::decode(&wire).expect("decode wire on A");
-                    if let Some(payload) = reassembler_a.feed(decoded).expect("feed on A") {
-                        reassembled_a = Some(payload);
-                    }
-                }
-                let payload = reassembled_a.expect("reassembly completed on A");
-                session_a.receive_message(&mut doc_a, payload).expect("receive on A");
-            }
-
-            if quiet {
-                break;
-            }
-        }
-
-        assert!(total_chunks_transferred > 1);
-
-        // Both docs converged!
-        let all_a = doc_a.all_tasks();
-        let all_b = doc_b.all_tasks();
-        assert_eq!(all_a.len(), 1);
-        assert_eq!(all_b.len(), 1);
-        assert_eq!(all_a[0].id, "task-ble-001");
-        assert_eq!(all_b[0].id, "task-ble-001");
-        assert_eq!(all_a[0].title, all_b[0].title);
-        assert_eq!(all_a[0].notes, all_b[0].notes);
     }
 }

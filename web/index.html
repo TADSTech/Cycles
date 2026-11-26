@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cycles — Seamless File Transfer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="header">
+      <h1>Cycles</h1>
+      <span id="status-pill" class="pill">Offline / Local</span>
+    </header>
+
+    <section id="drop-zone" class="drop-zone" tabindex="0" aria-label="Drop files to send">
+      <p class="drop-title">Drop files here or click to pick</p>
+      <p class="drop-sub">Zero-dependency web shell · Ready for LAN / BLE / WebRTC transport</p>
+      <input id="file-input" type="file" multiple hidden />
+    </section>
+
+    <section class="panel">
+      <h2>Queued Files</h2>
+      <ul id="file-list" class="list">
+        <li class="empty">No files queued yet.</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>Nearby Devices</h2>
+      <ul id="peer-list" class="list">
+        <li class="empty">Waiting for transport backend...</li>
+      </ul>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
