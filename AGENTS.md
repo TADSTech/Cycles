@@ -1,4 +1,4 @@
-# Project Rules: Cycle
+# Project Rules: Cycles2
 
 ## Process Enforcement: Ralph's Method
 Always follow Ralph's Method for all software tasks in this repository:

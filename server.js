@@ -140,4 +140,4 @@ Bun.serve({
   },
 });
 
-console.log(`Cycles server running on http://0.0.0.0:${PORT}`);
+console.log(`Cycles2 server running on http://0.0.0.0:${PORT}`);

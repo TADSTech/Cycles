@@ -3,64 +3,74 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Cycles — Seamless File Transfer</title>
+  <title>Cycles2 — Seamless File Transfer</title>
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#14b8a6" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <main class="shell">
     <header class="header">
       <div class="brand">
-        <h1>Cycles</h1>
-        <span id="device-badge" class="pill">Device</span>
+        <h1>Cycles2</h1>
+        <span id="device-badge" class="device-name">Device</span>
       </div>
       <div class="header-actions">
-        <button id="btn-pair" class="btn btn-primary" type="button">+ Pair Device</button>
+        <button id="btn-pair" class="btn btn-primary" type="button">Pair device</button>
         <button id="btn-settings" class="btn btn-ghost" type="button">Customize</button>
       </div>
     </header>
 
-    <section class="transport-bar" id="transport-bar" aria-label="Transport capabilities"></section>
-
-    <section class="grid-two">
-      <div class="panel">
-        <div class="panel-head">
-          <h2>Nearby &amp; Paired Devices</h2>
-          <button id="btn-ble-scan" class="btn btn-xs" type="button">BLE Scan</button>
-        </div>
-        <ul id="peer-list" class="list">
-          <li class="empty">No peers connected. Open another tab or click Pair Device.</li>
-        </ul>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Devices</h2>
+        <button id="btn-ble-scan" class="btn btn-ghost" type="button">Bluetooth</button>
       </div>
-
-      <div class="panel">
-        <div class="panel-head">
-          <h2>Instant Text / Link</h2>
-        </div>
-        <div class="text-send">
-          <textarea id="text-input" rows="3" placeholder="Paste a link, note, or snippet to beam to selected device..."></textarea>
-          <button id="btn-send-text" class="btn btn-primary" type="button">Send Text</button>
-        </div>
-      </div>
+      <ul id="peer-list" class="list">
+        <li class="empty">No peers yet. Pair a device or open on another tab.</li>
+      </ul>
     </section>
 
-    <section id="drop-zone" class="drop-zone" tabindex="0" aria-label="Drop files to send">
-      <p class="drop-title">Drop files here or click to pick</p>
-      <p class="drop-sub">Works across 2.4/5 GHz Wi-Fi, hotspots, public Wi-Fi, and local tabs</p>
-      <input id="file-input" type="file" multiple hidden />
+    <section class="section-block">
+      <div id="drop-zone" class="drop-zone" tabindex="0" aria-label="Drop files or folders to send">
+        <p class="drop-title">Drop files or folders, or click to browse</p>
+        <p class="drop-sub">Drag onto a device above to send immediately</p>
+        <div class="drop-actions">
+          <button id="btn-pick-folder" class="btn btn-ghost" type="button">Choose folder</button>
+        </div>
+        <input id="file-input" type="file" multiple hidden />
+        <input id="folder-input" type="file" webkitdirectory directory multiple hidden />
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Note or link</h2>
+        </div>
+        <div class="text-send">
+          <textarea id="text-input" rows="2" placeholder="Paste a link or note to send to the selected device..."></textarea>
+          <button id="btn-send-text" class="btn btn-primary" type="button">Send note</button>
+        </div>
+      </div>
     </section>
 
     <section class="panel" id="queue-panel">
       <div class="panel-head">
-        <h2>Queued Files</h2>
-        <button id="btn-send-files" class="btn btn-primary btn-xs" type="button" disabled>Send to Selected</button>
+        <h2>Queue</h2>
+        <div class="row-actions">
+          <button id="btn-share-link" class="btn btn-ghost" type="button" disabled>Share link</button>
+          <button id="btn-send-zip" class="btn btn-ghost" type="button" disabled>Send ZIP</button>
+          <button id="btn-send-files" class="btn btn-primary" type="button" disabled>Send</button>
+        </div>
       </div>
       <ul id="file-list" class="list">
-        <li class="empty">No files queued yet.</li>
+        <li class="empty">No files queued.</li>
       </ul>
     </section>
 
     <section class="panel">
-      <h2>Transfers &amp; Received</h2>
+      <div class="panel-head">
+        <h2>Transfers</h2>
+      </div>
       <ul id="transfer-list" class="list">
         <li class="empty">No transfers yet.</li>
       </ul>
@@ -126,7 +136,7 @@
   <div id="modal-settings" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal">
       <div class="modal-head">
-        <h3 id="settings-title">Customize Cycles</h3>
+        <h3 id="settings-title">Customize Cycles2</h3>
         <button class="btn btn-ghost btn-xs" data-close="modal-settings" type="button">Close</button>
       </div>
       <form id="settings-form" class="form-grid">
@@ -143,13 +153,29 @@
             <option value="512">512 KB (Max Throughput)</option>
           </select>
         </label>
+        <label class="field">
+          <span>Parallel DataChannels (5 GHz Speed)</span>
+          <select id="set-parallel">
+            <option value="1">1 Channel (Low Power / BLE)</option>
+            <option value="2">2 Channels (Balanced)</option>
+            <option value="4">4 Channels (Max 5 GHz Speed)</option>
+          </select>
+        </label>
         <label class="check">
           <input id="set-integrity" type="checkbox" />
-          <span>Verify SHA-256 Integrity</span>
+          <span>Verify SHA-256 Integrity (&le; 64 MB)</span>
         </label>
         <label class="check">
           <input id="set-auto-accept" type="checkbox" />
           <span>Auto-accept files from trusted peers</span>
+        </label>
+        <label class="check">
+          <input id="set-auto-reconnect" type="checkbox" />
+          <span>Auto-reconnect to trusted peers</span>
+        </label>
+        <label class="check">
+          <input id="set-sound" type="checkbox" />
+          <span>Chime &amp; vibrate on arrival</span>
         </label>
         <label class="check">
           <input id="set-lan-only" type="checkbox" />
@@ -159,6 +185,14 @@
           <span>Custom STUN Server</span>
           <input id="set-stun" type="text" placeholder="stun:stun.l.google.com:19302" />
         </label>
+        <label class="field">
+          <span>Optional TURN Server URL</span>
+          <input id="set-turn-url" type="text" placeholder="turn:turn.example.com:3478" />
+        </label>
+        <div class="row-actions">
+          <input id="set-turn-user" type="text" placeholder="TURN username" />
+          <input id="set-turn-pass" type="text" placeholder="TURN credential" />
+        </div>
         <label class="check">
           <input id="set-tr-broadcast" type="checkbox" />
           <span>Enable Tab Mesh (BroadcastChannel)</span>

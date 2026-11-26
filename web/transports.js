@@ -134,6 +134,24 @@ function waitIceGathering(pc, timeoutMs = 2500) {
   });
 }
 
+const TRUSTED_STORAGE_KEY = 'cycles.trustedPeers.v1';
+
+function loadTrustedPeerIds() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(TRUSTED_STORAGE_KEY) || '[]'));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveTrustedPeerIds(set) {
+  try {
+    localStorage.setItem(TRUSTED_STORAGE_KEY, JSON.stringify(Array.from(set)));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
 export class TransportManager {
   constructor({ deviceId, getSettings, onPeersChanged, onMessage, onRoomEvent }) {
     this.deviceId = deviceId;
@@ -143,6 +161,7 @@ export class TransportManager {
     this.onRoomEvent = onRoomEvent;
 
     this.peers = new Map();
+    this.trustedIds = loadTrustedPeerIds();
     this.discoveredLanPeers = [];
     this.bc = null;
     this.ws = null;
@@ -216,6 +235,9 @@ export class TransportManager {
     const peer = this.peers.get(peerId);
     if (peer) {
       peer.trusted = trusted;
+      if (trusted) this.trustedIds.add(peerId);
+      else this.trustedIds.delete(peerId);
+      saveTrustedPeerIds(this.trustedIds);
       this.emitPeers();
     }
   }
@@ -282,53 +304,85 @@ export class TransportManager {
   _buildRtcConfig() {
     const s = this.getSettings();
     if (s.lanOnlyIce) return { iceServers: [] };
+    const servers = [];
     const stunUrl = (s.stunUrl || 'stun:stun.l.google.com:19302').trim();
-    return { iceServers: stunUrl ? [{ urls: stunUrl }] : [] };
+    if (stunUrl) servers.push({ urls: stunUrl });
+    if (s.turnUrl && s.turnUrl.trim()) {
+      const turn = { urls: s.turnUrl.trim() };
+      if (s.turnUser) turn.username = s.turnUser;
+      if (s.turnPass) turn.credential = s.turnPass;
+      servers.push(turn);
+    }
+    return { iceServers: servers };
   }
 
-  _wireDataChannel(dc, pc, peerId, peerName, trusted = false) {
-    dc.binaryType = 'arraybuffer';
+  _wireMultiChannelPeer(pc, peerId, peerName, trusted = false) {
+    const channels = [];
+    const isTrusted = trusted || this.trustedIds.has(peerId);
+    if (isTrusted) {
+      this.trustedIds.add(peerId);
+      saveTrustedPeerIds(this.trustedIds);
+    }
+
     const peer = {
       id: peerId,
       name: peerName || 'WebRTC Peer',
       transport: 'WebRTC P2P',
-      trusted,
+      trusted: isTrusted,
       pc,
-      dc,
+      channels,
       sendJson: async (obj) => {
-        if (dc.readyState !== 'open') throw new Error('DataChannel not open');
-        dc.send(JSON.stringify(obj));
+        const ctrl = channels[0];
+        if (!ctrl || ctrl.readyState !== 'open') throw new Error('DataChannel not open');
+        ctrl.send(JSON.stringify(obj));
       },
-      sendBinary: async (buf) => {
-        if (dc.readyState !== 'open') throw new Error('DataChannel not open');
-        if (dc.bufferedAmount > 1024 * 1024) {
+      sendBinary: async (buf, chunkIndex = 0) => {
+        const open = channels.filter((c) => c.readyState === 'open');
+        if (open.length === 0) throw new Error('DataChannel not open');
+        const ch = open[chunkIndex % open.length];
+        if (ch.bufferedAmount > 1024 * 1024) {
           await new Promise((resolve) => {
-            dc.bufferedAmountLowThreshold = 256 * 1024;
+            ch.bufferedAmountLowThreshold = 256 * 1024;
             const onLow = () => {
-              dc.removeEventListener('bufferedamountlow', onLow);
+              ch.removeEventListener('bufferedamountlow', onLow);
               resolve();
             };
-            dc.addEventListener('bufferedamountlow', onLow);
+            ch.addEventListener('bufferedamountlow', onLow);
           });
         }
-        dc.send(buf);
+        ch.send(buf);
       },
     };
 
-    dc.onopen = () => {
-      this.peers.set(peerId, peer);
-      this.emitPeers();
-      this.onRoomEvent?.({ type: 'connected', peer });
+    const attachChannel = (dc) => {
+      dc.binaryType = 'arraybuffer';
+      channels.push(dc);
+      dc.onopen = () => {
+        if (!this.peers.has(peerId)) {
+          this.peers.set(peerId, peer);
+          this.emitPeers();
+          this.onRoomEvent?.({ type: 'connected', peer });
+        }
+      };
+      dc.onclose = () => {
+        if (channels.every((c) => c.readyState === 'closed')) {
+          this.peers.delete(peerId);
+          this.activeRtcByPeer.delete(peerId);
+          this.pendingIce.delete(peerId);
+          this.emitPeers();
+        }
+      };
+      dc.onmessage = (ev) => {
+        this.onMessage?.(peer, ev.data);
+      };
     };
-    dc.onclose = () => {
-      this.peers.delete(peerId);
-      this.activeRtcByPeer.delete(peerId);
-      this.pendingIce.delete(peerId);
-      this.emitPeers();
-    };
-    dc.onmessage = (ev) => {
-      this.onMessage?.(peer, ev.data);
-    };
+
+    return { peer, attachChannel };
+  }
+
+  _wireDataChannel(dc, pc, peerId, peerName, trusted = false) {
+    const { attachChannel } = this._wireMultiChannelPeer(pc, peerId, peerName, trusted);
+    attachChannel(dc);
   }
 
   // --- 3. WebSocket Auto-Handshake (6-Digit Code & 1-Click LAN) ---
@@ -368,6 +422,19 @@ export class TransportManager {
     if (msg.type === 'peers') {
       this.discoveredLanPeers = (msg.peers || []).filter((p) => p.id !== this.deviceId);
       this.emitPeers();
+      // Auto-reconnect to previously trusted peers when both are online (deterministic tie-break)
+      if (this.getSettings().autoReconnectTrusted) {
+        for (const p of this.discoveredLanPeers) {
+          if (
+            this.trustedIds.has(p.id) &&
+            !this.peers.has(p.id) &&
+            !this.activeRtcByPeer.has(p.id) &&
+            this.deviceId < p.id
+          ) {
+            this._initiateBrokerRtc(p.id, p.name, null).catch(() => {});
+          }
+        }
+      }
       return;
     }
 
@@ -421,8 +488,11 @@ export class TransportManager {
 
   async _initiateBrokerRtc(peerId, peerName, code) {
     const pc = new RTCPeerConnection(this._buildRtcConfig());
-    const dc = pc.createDataChannel('cycles', { ordered: true });
-    this._wireDataChannel(dc, pc, peerId, peerName, Boolean(code));
+    const { attachChannel } = this._wireMultiChannelPeer(pc, peerId, peerName, Boolean(code));
+    const count = Math.min(4, Math.max(1, Number(this.getSettings().parallelChannels) || 2));
+    for (let i = 0; i < count; i++) {
+      attachChannel(pc.createDataChannel(`cycles-${i}`, { ordered: true }));
+    }
     this.activeRtcByPeer.set(peerId, pc);
 
     pc.onicecandidate = (ev) => {
@@ -458,8 +528,9 @@ export class TransportManager {
       }
       const pc = new RTCPeerConnection(this._buildRtcConfig());
       this.activeRtcByPeer.set(fromId, pc);
+      const { attachChannel } = this._wireMultiChannelPeer(pc, fromId, fromName, Boolean(data.proof));
       pc.ondatachannel = (ev) => {
-        this._wireDataChannel(ev.channel, pc, fromId, fromName, Boolean(data.proof));
+        attachChannel(ev.channel);
       };
       pc.onicecandidate = (ev) => {
         if (ev.candidate && this.wsConnected) {

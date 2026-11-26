@@ -1,4 +1,4 @@
-// Chunked file & text transfer protocol with optional SHA-256 integrity.
+// Zero-RAM streaming file & text transfer protocol with OPFS, Wake Lock, and Pause/Resume/Cancel.
 
 export async function computeSha256Hex(buffer) {
   if (!globalThis.crypto?.subtle) return null;
@@ -24,7 +24,7 @@ export function formatSpeed(bytesPerSec) {
   return `${formatBytes(bytesPerSec)}/s`;
 }
 
-// Binary frame layout: [4B magic "CYC1"][16B transferId ASCII/UTF8 padded][4B chunkIndex u32][payload...]
+// Binary frame layout: [4B magic "CYC1"][16B transferId ASCII][4B chunkIndex u32][payload...]
 const MAGIC = [0x43, 0x59, 0x43, 0x31];
 
 export function encodeBinaryChunk(transferId, chunkIndex, payloadBytes) {
@@ -49,6 +49,38 @@ export function decodeBinaryChunk(arrayBuffer) {
   return { transferId, chunkIndex, payload };
 }
 
+class WakeLockHelper {
+  constructor() {
+    this.sentinel = null;
+    this.activeCount = 0;
+  }
+
+  async acquire() {
+    this.activeCount++;
+    if (this.sentinel || !navigator?.wakeLock?.request) return;
+    try {
+      this.sentinel = await navigator.wakeLock.request('screen');
+      this.sentinel.addEventListener('release', () => {
+        this.sentinel = null;
+      });
+    } catch {
+      // Ignore if denied or unsupported
+    }
+  }
+
+  async release() {
+    this.activeCount = Math.max(0, this.activeCount - 1);
+    if (this.activeCount === 0 && this.sentinel) {
+      try {
+        await this.sentinel.release();
+      } catch {
+        // Ignore
+      }
+      this.sentinel = null;
+    }
+  }
+}
+
 export class TransferSessionManager {
   constructor({ onProgress, onIncomingOffer, onFileReceived, onTextReceived, onError }) {
     this.onProgress = onProgress;
@@ -57,71 +89,146 @@ export class TransferSessionManager {
     this.onTextReceived = onTextReceived;
     this.onError = onError;
     this.incoming = new Map();
-    this.outgoingCancelled = new Set();
+    this.outgoingState = new Map(); // id -> { paused, cancelled, resumeResolve }
+    this.wakeLock = new WakeLockHelper();
+  }
+
+  pauseOutgoing(transferId) {
+    const st = this.outgoingState.get(transferId);
+    if (st) st.paused = true;
+  }
+
+  resumeOutgoing(transferId) {
+    const st = this.outgoingState.get(transferId);
+    if (st) {
+      st.paused = false;
+      st.resumeResolve?.();
+      st.resumeResolve = null;
+    }
   }
 
   cancelOutgoing(transferId) {
-    this.outgoingCancelled.add(transferId);
+    const st = this.outgoingState.get(transferId);
+    if (st) {
+      st.cancelled = true;
+      st.paused = false;
+      st.resumeResolve?.();
+    }
+  }
+
+  isPaused(transferId) {
+    return Boolean(this.outgoingState.get(transferId)?.paused);
   }
 
   async sendText(peer, text) {
     const id = crypto.randomUUID ? crypto.randomUUID().slice(0, 16) : String(Date.now()).slice(0, 16);
-    await peer.sendJson({
-      type: 'text',
-      id,
-      text,
-      timestamp: Date.now(),
-    });
+    await peer.sendJson({ type: 'text', id, text, timestamp: Date.now() });
     return id;
   }
 
   async sendFile(peer, file, settings) {
     const id = crypto.randomUUID ? crypto.randomUUID().slice(0, 16) : `${Date.now()}`.slice(0, 16);
     const chunkSize = (settings.chunkSizeKb || 64) * 1024;
-    const buffer = await file.arrayBuffer();
-    const sha256 = settings.verifyIntegrity ? await computeSha256Hex(buffer) : null;
-    const totalChunks = Math.max(1, Math.ceil(buffer.byteLength / chunkSize));
+    const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
 
-    await peer.sendJson({
-      type: 'file-offer',
-      id,
-      name: file.name,
-      size: file.size,
-      mime: file.type || 'application/octet-stream',
-      totalChunks,
-      sha256,
-    });
-
-    const startTime = performance.now();
-    let sentBytes = 0;
-
-    for (let i = 0; i < totalChunks; i++) {
-      if (this.outgoingCancelled.has(id)) {
-        this.outgoingCancelled.delete(id);
-        await peer.sendJson({ type: 'file-cancel', id });
-        return;
-      }
-      const start = i * chunkSize;
-      const end = Math.min(buffer.byteLength, start + chunkSize);
-      const slice = buffer.slice(start, end);
-      const frame = encodeBinaryChunk(id, i, slice);
-      await peer.sendBinary(frame);
-
-      sentBytes += slice.byteLength;
-      const elapsedSec = Math.max(0.001, (performance.now() - startTime) / 1000);
-      this.onProgress?.({
-        id,
-        direction: 'out',
-        name: file.name,
-        transferred: sentBytes,
-        total: file.size,
-        speed: sentBytes / elapsedSec,
-        peerName: peer.name,
-        done: i === totalChunks - 1,
-      });
+    // Only compute full-file SHA-256 in memory for files <= 64 MB to keep RAM low
+    let sha256 = null;
+    if (settings.verifyIntegrity && file.size <= 64 * 1024 * 1024) {
+      sha256 = await computeSha256Hex(await file.arrayBuffer());
     }
 
-    await peer.sendJson({ type: 'file-complete', id });
+    const state = { paused: false, cancelled: false, resumeResolve: null };
+    this.outgoingState.set(id, state);
+    await this.wakeLock.acquire();
+
+    try {
+      await peer.sendJson({
+        type: 'file-offer',
+        id,
+        name: file.name,
+        size: file.size,
+        mime: file.type || 'application/octet-stream',
+        chunkSize,
+        totalChunks,
+        sha256,
+      });
+
+      const startTime = performance.now();
+      let sentBytes = 0;
+
+      for (let i = 0; i < totalChunks; i++) {
+        while (state.paused && !state.cancelled) {
+          this.onProgress?.({
+            id,
+            direction: 'out',
+            name: file.name,
+            transferred: sentBytes,
+            total: file.size,
+            speed: 0,
+            paused: true,
+            peerName: peer.name,
+            done: false,
+          });
+          await new Promise((resolve) => {
+            state.resumeResolve = resolve;
+          });
+        }
+
+        if (state.cancelled) {
+          await peer.sendJson({ type: 'file-cancel', id });
+          this.onProgress?.({
+            id,
+            direction: 'out',
+            name: file.name,
+            transferred: sentBytes,
+            total: file.size,
+            speed: 0,
+            cancelled: true,
+            peerName: peer.name,
+            done: true,
+          });
+          return;
+        }
+
+        const start = i * chunkSize;
+        const end = Math.min(file.size, start + chunkSize);
+        const sliceBuf = await file.slice(start, end).arrayBuffer();
+        const frame = encodeBinaryChunk(id, i, sliceBuf);
+        await peer.sendBinary(frame, i);
+
+        sentBytes += sliceBuf.byteLength;
+        const elapsedSec = Math.max(0.001, (performance.now() - startTime) / 1000);
+        this.onProgress?.({
+          id,
+          direction: 'out',
+          name: file.name,
+          transferred: sentBytes,
+          total: file.size,
+          speed: sentBytes / elapsedSec,
+          paused: false,
+          peerName: peer.name,
+          done: i === totalChunks - 1,
+        });
+      }
+
+      await peer.sendJson({ type: 'file-complete', id });
+    } finally {
+      this.outgoingState.delete(id);
+      await this.wakeLock.release();
+    }
+  }
+
+  async _openOpfsWritable(id) {
+    if (!navigator?.storage?.getDirectory) return null;
+    try {
+      const root = await navigator.storage.getDirectory();
+      const fileHandle = await root.getFileHandle(`cyc-${id}.part`, { create: true });
+      if (!fileHandle.createWritable) return null;
+      const writable = await fileHandle.createWritable();
+      return { root, fileHandle, writable, name: `cyc-${id}.part` };
+    } catch {
+      return null;
+    }
   }
 
   async handleMessage(peer, data, settings) {
@@ -149,9 +256,12 @@ export class TransferSessionManager {
           name: msg.name,
           size: msg.size,
           mime: msg.mime,
+          chunkSize: msg.chunkSize || 64 * 1024,
           totalChunks: msg.totalChunks,
           sha256: msg.sha256,
-          chunks: new Array(msg.totalChunks),
+          chunks: [],
+          opfs: null,
+          writeChain: Promise.resolve(),
           receivedBytes: 0,
           startTime: performance.now(),
           accepted: Boolean(settings.autoAcceptTrusted && peer.trusted),
@@ -172,11 +282,27 @@ export class TransferSessionManager {
             return;
           }
         }
+
+        await this.wakeLock.acquire();
+        entry.opfs = await this._openOpfsWritable(msg.id);
+        if (!entry.opfs) {
+          entry.chunks = new Array(msg.totalChunks);
+        }
         return;
       }
 
       if (msg.type === 'file-cancel') {
+        const entry = this.incoming.get(msg.id);
         this.incoming.delete(msg.id);
+        if (entry?.opfs) {
+          try {
+            await entry.opfs.writable.abort();
+            await entry.opfs.root.removeEntry(entry.opfs.name);
+          } catch {
+            // Ignore cleanup errors
+          }
+        }
+        await this.wakeLock.release();
         return;
       }
 
@@ -185,27 +311,43 @@ export class TransferSessionManager {
         if (!entry || !entry.accepted) return;
         this.incoming.delete(msg.id);
 
-        const blob = new Blob(entry.chunks, { type: entry.mime });
-        let verified = null;
-        if (entry.sha256 && settings.verifyIntegrity) {
-          const fullBuf = await blob.arrayBuffer();
-          const actual = await computeSha256Hex(fullBuf);
-          verified = actual ? actual === entry.sha256 : null;
-        }
+        try {
+          let blob;
+          if (entry.opfs) {
+            await entry.writeChain;
+            await entry.opfs.writable.close();
+            const file = await entry.opfs.fileHandle.getFile();
+            blob = new Blob([file], { type: entry.mime });
+            try {
+              await entry.opfs.root.removeEntry(entry.opfs.name);
+            } catch {
+              // Ignore
+            }
+          } else {
+            blob = new Blob(entry.chunks, { type: entry.mime });
+          }
 
-        this.onFileReceived?.({
-          id: entry.id,
-          name: entry.name,
-          size: entry.size,
-          blob,
-          verified,
-          peerName: peer.name,
-        });
+          let verified = null;
+          if (entry.sha256 && settings.verifyIntegrity && entry.size <= 64 * 1024 * 1024) {
+            const actual = await computeSha256Hex(await blob.arrayBuffer());
+            verified = actual ? actual === entry.sha256 : null;
+          }
+
+          this.onFileReceived?.({
+            id: entry.id,
+            name: entry.name,
+            size: entry.size,
+            blob,
+            verified,
+            peerName: peer.name,
+          });
+        } finally {
+          await this.wakeLock.release();
+        }
       }
       return;
     }
 
-    // Binary chunk
     const buf = data instanceof ArrayBuffer ? data : await data.arrayBuffer?.();
     if (!buf) return;
     const chunk = decodeBinaryChunk(buf);
@@ -214,7 +356,16 @@ export class TransferSessionManager {
     const entry = this.incoming.get(chunk.transferId);
     if (!entry || !entry.accepted) return;
 
-    entry.chunks[chunk.chunkIndex] = chunk.payload;
+    if (entry.opfs) {
+      const payload = chunk.payload;
+      const pos = chunk.chunkIndex * entry.chunkSize;
+      entry.writeChain = entry.writeChain.then(() =>
+        entry.opfs.writable.write({ type: 'write', position: pos, data: payload })
+      );
+    } else {
+      entry.chunks[chunk.chunkIndex] = chunk.payload;
+    }
+
     entry.receivedBytes += chunk.payload.byteLength;
     const elapsedSec = Math.max(0.001, (performance.now() - entry.startTime) / 1000);
 
