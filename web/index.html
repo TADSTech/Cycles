@@ -9,31 +9,191 @@
 <body>
   <main class="shell">
     <header class="header">
-      <h1>Cycles</h1>
-      <span id="status-pill" class="pill">Offline / Local</span>
+      <div class="brand">
+        <h1>Cycles</h1>
+        <span id="device-badge" class="pill">Device</span>
+      </div>
+      <div class="header-actions">
+        <button id="btn-pair" class="btn btn-primary" type="button">+ Pair Device</button>
+        <button id="btn-settings" class="btn btn-ghost" type="button">Customize</button>
+      </div>
     </header>
+
+    <section class="transport-bar" id="transport-bar" aria-label="Transport capabilities"></section>
+
+    <section class="grid-two">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Nearby &amp; Paired Devices</h2>
+          <button id="btn-ble-scan" class="btn btn-xs" type="button">BLE Scan</button>
+        </div>
+        <ul id="peer-list" class="list">
+          <li class="empty">No peers connected. Open another tab or click Pair Device.</li>
+        </ul>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Instant Text / Link</h2>
+        </div>
+        <div class="text-send">
+          <textarea id="text-input" rows="3" placeholder="Paste a link, note, or snippet to beam to selected device..."></textarea>
+          <button id="btn-send-text" class="btn btn-primary" type="button">Send Text</button>
+        </div>
+      </div>
+    </section>
 
     <section id="drop-zone" class="drop-zone" tabindex="0" aria-label="Drop files to send">
       <p class="drop-title">Drop files here or click to pick</p>
-      <p class="drop-sub">Zero-dependency web shell · Ready for LAN / BLE / WebRTC transport</p>
+      <p class="drop-sub">Works across 2.4/5 GHz Wi-Fi, hotspots, public Wi-Fi, and local tabs</p>
       <input id="file-input" type="file" multiple hidden />
     </section>
 
-    <section class="panel">
-      <h2>Queued Files</h2>
+    <section class="panel" id="queue-panel">
+      <div class="panel-head">
+        <h2>Queued Files</h2>
+        <button id="btn-send-files" class="btn btn-primary btn-xs" type="button" disabled>Send to Selected</button>
+      </div>
       <ul id="file-list" class="list">
         <li class="empty">No files queued yet.</li>
       </ul>
     </section>
 
     <section class="panel">
-      <h2>Nearby Devices</h2>
-      <ul id="peer-list" class="list">
-        <li class="empty">Waiting for transport backend...</li>
+      <h2>Transfers &amp; Received</h2>
+      <ul id="transfer-list" class="list">
+        <li class="empty">No transfers yet.</li>
       </ul>
     </section>
   </main>
 
-  <script src="app.js"></script>
+  <!-- Custom Pair Device Modal -->
+  <div id="modal-pair" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="pair-title">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="pair-title">Pair Any Device</h3>
+        <button class="btn btn-ghost btn-xs" data-close="modal-pair" type="button">Close</button>
+      </div>
+      <div class="tabs">
+        <button class="tab active" data-pair-tab="host" type="button">1. Get Code</button>
+        <button class="tab" data-pair-tab="join" type="button">2. Enter / Scan Code</button>
+      </div>
+
+      <div id="pair-host-pane" class="tab-pane">
+        <p class="muted">Share this 8-character code or scan the QR on the other device. Handshake is automatic.</p>
+        <button id="btn-create-room" class="btn btn-primary" type="button">Generate Pairing Code</button>
+        <div id="room-code-display" class="room-code hidden"></div>
+        <div id="room-qr" class="qr-box hidden"></div>
+      </div>
+
+      <div id="pair-join-pane" class="tab-pane hidden">
+        <p class="muted">Enter the 8-character code from the other device or scan its QR.</p>
+        <div class="row-actions">
+          <input id="room-code-in" class="code-input" type="text" maxlength="9" placeholder="XXXX-XXXX" autocapitalize="characters" autocomplete="off" />
+          <button id="btn-join-room" class="btn btn-primary" type="button">Connect</button>
+        </div>
+        <div class="row-actions">
+          <button id="btn-scan-room" class="btn btn-ghost btn-xs" type="button">Scan QR (Camera)</button>
+          <label class="btn btn-ghost btn-xs" for="qr-file-input">Scan from Photo</label>
+          <input id="qr-file-input" type="file" accept="image/*" capture="environment" hidden />
+        </div>
+      </div>
+
+      <div id="qr-scanner-wrap" class="scanner-wrap hidden">
+        <video id="qr-video" playsinline muted autoplay></video>
+        <button id="btn-stop-scan" class="btn btn-xs btn-ghost" type="button">Stop Camera</button>
+      </div>
+
+      <details class="offline-details">
+        <summary>Offline / No-Server Manual Mode</summary>
+        <div class="tab-pane" style="margin-top: 0.6rem;">
+          <button id="btn-create-offer" class="btn btn-xs" type="button">Create Offline Offer</button>
+          <textarea id="offer-out" class="code-box hidden" rows="2" readonly></textarea>
+          <textarea id="answer-in" class="hidden" rows="2" placeholder="Paste offline answer..."></textarea>
+          <button id="btn-complete-answer" class="btn btn-xs hidden" type="button">Finish Offline Pair</button>
+          <hr class="sep" />
+          <textarea id="offer-in" rows="2" placeholder="Paste offline offer..."></textarea>
+          <button id="btn-accept-offer" class="btn btn-xs" type="button">Create Offline Answer</button>
+          <textarea id="answer-out" class="code-box hidden" rows="2" readonly></textarea>
+        </div>
+      </details>
+
+      <p id="pair-status" class="status-msg"></p>
+    </div>
+  </div>
+
+  <!-- Custom Settings / Customize Modal -->
+  <div id="modal-settings" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="settings-title">Customize Cycles</h3>
+        <button class="btn btn-ghost btn-xs" data-close="modal-settings" type="button">Close</button>
+      </div>
+      <form id="settings-form" class="form-grid">
+        <label class="field">
+          <span>Device Name</span>
+          <input id="set-name" type="text" maxlength="32" required />
+        </label>
+        <label class="field">
+          <span>Chunk Size</span>
+          <select id="set-chunk">
+            <option value="16">16 KB (BLE / Weak Signal)</option>
+            <option value="64">64 KB (Balanced / 2.4 GHz)</option>
+            <option value="256">256 KB (Fast / 5 GHz Wi-Fi)</option>
+            <option value="512">512 KB (Max Throughput)</option>
+          </select>
+        </label>
+        <label class="check">
+          <input id="set-integrity" type="checkbox" />
+          <span>Verify SHA-256 Integrity</span>
+        </label>
+        <label class="check">
+          <input id="set-auto-accept" type="checkbox" />
+          <span>Auto-accept files from trusted peers</span>
+        </label>
+        <label class="check">
+          <input id="set-lan-only" type="checkbox" />
+          <span>LAN-only ICE (Zero external STUN / Zero cellular data)</span>
+        </label>
+        <label class="field">
+          <span>Custom STUN Server</span>
+          <input id="set-stun" type="text" placeholder="stun:stun.l.google.com:19302" />
+        </label>
+        <label class="check">
+          <input id="set-tr-broadcast" type="checkbox" />
+          <span>Enable Tab Mesh (BroadcastChannel)</span>
+        </label>
+        <label class="check">
+          <input id="set-tr-ws" type="checkbox" />
+          <span>Enable Local WebSocket Signaling</span>
+        </label>
+        <label class="field">
+          <span>Signaling WebSocket URL</span>
+          <input id="set-ws-url" type="text" placeholder="ws://localhost:8787" />
+        </label>
+        <div class="modal-foot">
+          <button id="btn-reset-settings" class="btn btn-ghost" type="button">Reset Defaults</button>
+          <button class="btn btn-primary" type="submit">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Custom Incoming Transfer Prompt Modal -->
+  <div id="modal-incoming" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="incoming-title">
+    <div class="modal modal-sm">
+      <h3 id="incoming-title">Incoming File</h3>
+      <p id="incoming-desc" class="muted"></p>
+      <div class="modal-foot">
+        <button id="btn-incoming-reject" class="btn btn-ghost" type="button">Decline</button>
+        <button id="btn-incoming-accept" class="btn btn-primary" type="button">Accept</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <script src="qr.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>
